@@ -1,1 +1,3 @@
-[![@gourab337's Holopin board](https://holopin.me/gourab337)](https://holopin.io/@gourab337)
+# gourab337.github.io
+
+Personal site. Plain HTML and CSS, no build step. Served by GitHub Pages from `main`.

@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Real-time EV charging pipeline · Gourab Chakraborty</title>
+  <meta name="description" content="Interactive replay of a streaming pipeline: 40,853 MQTT events for 433 NSW fast chargers, stored in DuckDB and shown on a live map.">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <style>
+    main.wide { max-width: 72rem; padding-top: 2.5rem; }
+    .back { font: 0.85rem system-ui, sans-serif; }
+    .lede { max-width: 42rem; }
+    .note {
+      font: 0.85rem/1.5 system-ui, sans-serif; color: var(--muted);
+      border-left: 3px solid var(--rule); padding: 0.4rem 0 0.4rem 0.8rem; margin: 1rem 0 1.5rem; max-width: 42rem;
+    }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center;
+      font: 0.9rem system-ui, sans-serif; margin: 1.5rem 0 0.8rem;
+    }
+    .controls button {
+      font: 600 0.9rem system-ui, sans-serif; padding: 0.35rem 0.9rem; border-radius: 6px;
+      border: 1px solid var(--rule); background: var(--fg); color: var(--bg); cursor: pointer; min-width: 5.5rem;
+    }
+    .controls select { font: inherit; padding: 0.25rem; background: var(--bg); color: var(--fg); border: 1px solid var(--rule); border-radius: 6px; }
+    .clock { font: 600 1.1rem ui-monospace, Menlo, monospace; min-width: 9rem; }
+    #scrub { flex: 1 1 14rem; accent-color: var(--link); }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 0.6rem; margin-bottom: 0.8rem; }
+    .kpi { border: 1px solid var(--rule); border-radius: 8px; padding: 0.55rem 0.75rem; font-family: system-ui, sans-serif; }
+    .kpi .label { font-size: 0.75rem; color: var(--muted); }
+    .kpi .value { font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .kpi .sub { font-size: 0.7rem; color: var(--muted); }
+    #map { height: 30rem; border: 1px solid var(--rule); border-radius: 8px; }
+    .legend { font: 0.78rem system-ui, sans-serif; color: var(--muted); margin: 0.4rem 0 1rem; display: flex; gap: 1rem; flex-wrap: wrap; }
+    .dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; vertical-align: -1px; margin-right: 0.3rem; border: 2px solid; }
+    .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 0.8rem; }
+    .chart { border: 1px solid var(--rule); border-radius: 8px; padding: 0.6rem 0.8rem; font-family: system-ui, sans-serif; }
+    .chart h3 { font-size: 0.85rem; margin: 0 0 0.1rem; }
+    .chart .sub { font-size: 0.72rem; color: var(--muted); margin-bottom: 0.3rem; }
+    .chart svg { width: 100%; height: auto; display: block; }
+    .chart text { fill: var(--muted); font-size: 10px; }
+    .chart .bar { fill: var(--link); }
+    .chart .val { fill: var(--fg); font-size: 10px; }
+    .leaflet-popup-content { font: 0.8rem/1.45 system-ui, sans-serif; min-width: 15rem; }
+    .leaflet-popup-content b { font-size: 0.9rem; }
+    .pop-row { display: flex; justify-content: space-between; gap: 1rem; }
+    .pop-row span:first-child { color: #777; }
+    .pop-sessions { margin: 0.4rem 0 0; padding: 0; }
+    .pop-sessions li { margin: 0.1rem 0; }
+    .arch { font: 0.85rem/1.55 system-ui, sans-serif; }
+    .arch li { margin-bottom: 0.45rem; }
+    .flow { font: 0.8rem ui-monospace, Menlo, monospace; color: var(--muted); overflow-x: auto; white-space: nowrap; margin: 0.5rem 0 1rem; }
+    .loading { color: var(--muted); font: 0.9rem system-ui, sans-serif; }
+    @media (max-width: 480px) { #map { height: 22rem; } .kpi .value { font-size: 1.15rem; } }
+  </style>
+</head>
+<body>
+<main class="wide">
+  <p class="back"><a href="../index.html">← Gourab Chakraborty</a></p>
+  <h1>Real-time EV charging pipeline</h1>
+  <p class="tagline">MQTT → DuckDB → live map, for 433 NSW fast chargers.</p>
+
+  <p class="lede">
+    Every number on this page comes from the event stream the pipeline actually recorded: 40,853 price,
+    session and meter events, published over MQTT with QoS 1, stored in DuckDB by the subscriber, and checked
+    end to end. Press play to watch the day stream in, drag the slider to jump in time, and click a charger
+    to see its live sessions.
+  </p>
+  <p class="note">
+    <strong>About the code.</strong> This was a team project, so the source is not mine alone to publish and the
+    repository stays private. This page is a browser replay of the recorded stream, not the production app.
+    I can walk through the architecture and code in a discussion.
+    Charger locations, operators and power ratings are real public data; prices and charging sessions
+    were simulated from real NSW wholesale prices.
+  </p>
+
+  <div class="controls">
+    <button id="play" type="button" disabled>Loading…</button>
+    <label>Speed
+      <select id="speed">
+        <option value="2">2 min / s</option>
+        <option value="5" selected>5 min / s</option>
+        <option value="15">15 min / s</option>
+      </select>
+    </label>
+    <span class="clock" id="clock">--:--</span>
+    <input id="scrub" type="range" min="0" max="1" step="0.5" value="0" aria-label="Replay time">
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="label">Active sessions</div><div class="value" id="k-active">–</div><div class="sub">charging right now</div></div>
+    <div class="kpi"><div class="label">Connector occupancy</div><div class="value" id="k-occ">–</div><div class="sub" id="k-occ-sub">of connectors in use</div></div>
+    <div class="kpi"><div class="label">Average price</div><div class="value" id="k-price">–</div><div class="sub">current, across chargers</div></div>
+    <div class="kpi"><div class="label">Energy delivered</div><div class="value" id="k-energy">–</div><div class="sub">from meter readings</div></div>
+    <div class="kpi"><div class="label">Events replayed</div><div class="value" id="k-events">–</div><div class="sub">of 40,853 recorded</div></div>
+  </div>
+
+  <div id="map"><p class="loading" style="padding:1rem">Loading map and 40k events…</p></div>
+  <div class="legend">
+    <span><span class="dot" style="border-color:#2e9e44;background:#2e9e4433"></span>All connectors free</span>
+    <span><span class="dot" style="border-color:#e08a00;background:#e08a00"></span>Some in use</span>
+    <span><span class="dot" style="border-color:#d64541;background:#d64541"></span>All in use</span>
+    <span>Marker size = number of connectors</span>
+  </div>
+
+  <div class="charts">
+    <div class="chart"><h3>Energy delivered per hour</h3><div class="sub">kWh, from differenced meter readings</div><svg id="c-energy" viewBox="0 0 320 150"></svg></div>
+    <div class="chart"><h3>Sessions started per hour</h3><div class="sub">session_start events received</div><svg id="c-starts" viewBox="0 0 320 150"></svg></div>
+    <div class="chart"><h3>Billed energy by operator</h3><div class="sub">completed sessions, kWh, top 8</div><svg id="c-ops" viewBox="0 0 320 170"></svg></div>
+  </div>
+
+  <h2>How the real pipeline works</h2>
+  <div class="flow">simulator → event builder → publisher (QoS 1) → Mosquitto → subscriber → DuckDB → Dash + Leaflet dashboard</div>
+  <ul class="arch">
+    <li><strong>Events.</strong> A simulator produced a day of hourly prices and charging sessions for every DC charger in a cleaned NSW charger database. The event builder turns them into ordered price-change, session start/end and per-minute meter events, and keeps only real price changes.</li>
+    <li><strong>Publishing.</strong> A paced QoS 1 publisher writes an fsynced acknowledgement log and checkpoints, so after a crash it resumes from the last acknowledged message. Prices are retained messages, so a new subscriber gets current prices straight away, and a last-will topic reports when the publisher goes offline.</li>
+    <li><strong>Ingest.</strong> The subscriber uses a persistent session, ignores duplicate deliveries by event id, tracks an event-time watermark to flag late events, quarantines malformed messages, and commits in batches to DuckDB.</li>
+    <li><strong>Serving.</strong> The dashboard only reads committed state, so every number on screen has been stored first.</li>
+    <li><strong>Verification.</strong> 33 automated checks compare what was prepared, published and stored. In the recorded run, 40,853 of 40,853 events arrived, with 0 rejects and 0 late events.</li>
+  </ul>
+  <p class="note">Stack: Python, paho-mqtt, Mosquitto, DuckDB (spatial), Dash, dash-leaflet. Built in 2026 at the University of Sydney.</p>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const fmt = (x, d = 0) => x.toLocaleString('en-AU', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const COLORS = { free: '#2e9e44', some: '#e08a00', full: '#d64541' };
+
+  fetch('data/ev-replay.json').then(r => r.json()).then(init).catch(() => {
+    $('map').innerHTML = '<p class="loading" style="padding:1rem">Could not load the replay data.</p>';
+  });
+
+  function init(D) {
+    const S = D.stations.map(([name, op, lat, lon, conn, kw, sa4]) => ({ name, op, lat, lon, conn, kw, sa4 }));
+    const totalConn = S.reduce((a, s) => a + s.conn, 0);
+    const T0 = new Date(D.t0);
+    const tMax = Math.max(D.meter[D.meter.length - 1][0], D.end[D.end.length - 1][0]);
+    const hour0 = (T0.getUTCHours() + 10) % 24;          // NEM is fixed UTC+10
+    const minute0 = T0.getUTCMinutes();
+    const hours = [];
+    for (let h = hour0; h <= hour0 + Math.floor((minute0 + tMax) / 60); h++) hours.push(h);
+    const hourOf = t => hour0 + Math.floor((minute0 + t) / 60);
+    const clockOf = t => {
+      const m = Math.floor(minute0 + t), h = hour0 + Math.floor(m / 60);
+      return String(h % 24).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0') + ' NEM';
+    };
+
+    // ---- map ----
+    $('map').innerHTML = '';
+    const map = L.map('map', { preferCanvas: true, scrollWheelZoom: false }).setView([-33.4, 150.6], 7);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+    const markers = S.map((s, i) => {
+      const m = L.circleMarker([s.lat, s.lon], { radius: 3 + Math.sqrt(s.conn) * 1.6, weight: 2 }).addTo(map);
+      m.bindTooltip('', { direction: 'top' });
+      m.on('click', () => { openStation = i; m.bindPopup(popupHtml(i), { maxWidth: 320 }).openPopup(); });
+      m.on('popupclose', () => { if (openStation === i) openStation = -1; });
+      return m;
+    });
+    let openStation = -1;
+
+    // ---- replay state ----
+    let st;
+    function reset() {
+      st = {
+        t: -1, pi: 0, si: 0, ei: 0, mi: 0, events: 0, energy: 0,
+        price: new Float64Array(S.length).fill(NaN),
+        occ: new Int16Array(S.length),
+        active: new Map(), lastKwh: new Map(),
+        eHour: Object.fromEntries(hours.map(h => [h, 0])),
+        sHour: Object.fromEntries(hours.map(h => [h, 0])),
+        opE: {}, shownState: new Array(S.length).fill('')
+      };
+    }
+    function advance(t) {
+      if (t < st.t) reset();
+      const P = D.price, A = D.start, M = D.meter, E = D.end;
+      while (st.pi < P.length && P[st.pi][0] <= t) { const [, s, p] = P[st.pi++]; st.price[s] = p; st.events++; }
+      while (st.si < A.length && A[st.si][0] <= t) {
+        const [ts, k, p] = A[st.si++]; const [s, conn, v] = D.sessions[k];
+        st.active.set(k, { s, conn, v, p, kw: 0, kwh: 0, soc: null, t: ts }); st.occ[s]++; st.sHour[hourOf(ts)]++; st.events++;
+      }
+      while (st.mi < M.length && M[st.mi][0] <= t) {
+        const [tm, k, kw, kwh, soc] = M[st.mi++];
+        const a = st.active.get(k); if (a) { a.kw = kw; a.kwh = kwh; a.soc = soc; }
+        const d = kwh - (st.lastKwh.get(k) || 0); st.lastKwh.set(k, kwh);
+        if (d > 0) { st.energy += d; st.eHour[hourOf(tm)] += d; }
+        st.events++;
+      }
+      while (st.ei < E.length && E[st.ei][0] <= t) {
+        const [, k, kwh] = E[st.ei++]; const a = st.active.get(k);
+        if (a) { st.active.delete(k); st.occ[a.s]--; }
+        const op = S[D.sessions[k][0]].op; st.opE[op] = (st.opE[op] || 0) + kwh; st.events++;
+      }
+      st.t = t;
+    }
+
+    // ---- rendering ----
+    function popupHtml(i) {
+      const s = S[i], p = st.price[i];
+      const sess = [...st.active.values()].filter(a => a.s === i);
+      const row = (k, v) => `<div class="pop-row"><span>${k}</span><span>${v}</span></div>`;
+      return `<b>${esc(s.name)}</b><br>${esc(s.op)}${s.sa4 ? ' · ' + esc(s.sa4) : ''}<hr style="margin:.4rem 0">` +
+        row('Charger', `DC · ${fmt(s.kw)} kW max · ${s.conn} connector${s.conn > 1 ? 's' : ''}`) +
+        row('Price', isNaN(p) ? '–' : `$${p.toFixed(2)}/kWh`) +
+        row('Occupancy', `${st.occ[i]} of ${s.conn} in use`) +
+        (sess.length ? '<b style="font-size:.8rem">Live sessions</b><ul class="pop-sessions">' + sess.map(a =>
+          `<li>Connector ${a.conn}: ${a.kw.toFixed(1)} kW, ${a.kwh.toFixed(1)} kWh${a.soc != null ? `, SoC ${Math.round(a.soc)}%` : ''} <span style="color:#777">(${esc(D.vehicles[a.v])})</span></li>`).join('') + '</ul>'
+          : '<div style="color:#777;margin-top:.3rem">No active sessions</div>');
+    }
+    function esc(x) { return String(x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+    function bars(svg, labels, values, opts = {}) {
+      const W = 320, H = opts.h || 150, padL = opts.padL || 26, padB = 18, padT = 12;
+      const max = Math.max(1, ...values) * 1.12, n = values.length;
+      let out = '';
+      if (opts.horizontal) {
+        const bh = (H - padT) / n;
+        values.forEach((v, i) => {
+          const w = (W - padL - 40) * v / max, y = padT + i * bh;
+          out += `<text x="${padL - 4}" y="${y + bh * 0.65}" text-anchor="end">${esc(labels[i])}</text>` +
+                 `<rect class="bar" x="${padL}" y="${y + 2}" width="${w}" height="${bh - 5}" rx="2"></rect>` +
+                 `<text class="val" x="${padL + w + 3}" y="${y + bh * 0.65}">${fmt(v)}</text>`;
+        });
+      } else {
+        const bw = (W - padL) / n;
+        values.forEach((v, i) => {
+          const h = (H - padB - padT) * v / max, x = padL + i * bw;
+          out += `<rect class="bar" x="${x + 3}" y="${H - padB - h}" width="${bw - 6}" height="${h}" rx="2"></rect>` +
+                 `<text x="${x + bw / 2}" y="${H - 5}" text-anchor="middle">${labels[i]}</text>` +
+                 (v > 0 ? `<text class="val" x="${x + bw / 2}" y="${H - padB - h - 3}" text-anchor="middle">${fmt(v)}</text>` : '');
+        });
+      }
+      svg.innerHTML = out;
+    }
+
+    let lastCharts = 0;
+    function render(force) {
+      $('clock').textContent = clockOf(st.t);
+      $('scrub').value = st.t;
+      $('k-active').textContent = fmt(st.active.size);
+      $('k-occ').textContent = (100 * st.active.size / totalConn).toFixed(1) + '%';
+      $('k-occ-sub').textContent = `${fmt(st.active.size)} of ${fmt(totalConn)} connectors`;
+      let ps = 0, pn = 0; st.price.forEach(p => { if (!isNaN(p)) { ps += p; pn++; } });
+      $('k-price').textContent = pn ? `$${(ps / pn).toFixed(2)}` : '–';
+      $('k-energy').textContent = fmt(st.energy) + ' kWh';
+      $('k-events').textContent = fmt(st.events);
+      S.forEach((s, i) => {
+        const o = st.occ[i], state = o === 0 ? 'free' : o >= s.conn ? 'full' : 'some';
+        const key = state + (isNaN(st.price[i]) ? '' : st.price[i]);
+        if (key !== st.shownState[i] || force) {
+          st.shownState[i] = key;
+          markers[i].setStyle({ color: COLORS[state], fillColor: COLORS[state], fillOpacity: state === 'free' ? 0.2 : 0.85 });
+          markers[i].setTooltipContent(`${esc(s.name)}<br>${isNaN(st.price[i]) ? '' : '$' + st.price[i].toFixed(2) + '/kWh · '}${o}/${s.conn} in use`);
+        }
+      });
+      if (openStation >= 0) markers[openStation].setPopupContent(popupHtml(openStation));
+      const now = performance.now();
+      if (force || now - lastCharts > 400) {
+        lastCharts = now;
+        const hl = hours.map(h => String(h % 24).padStart(2, '0'));
+        bars($('c-energy'), hl, hours.map(h => st.eHour[h]));
+        bars($('c-starts'), hl, hours.map(h => st.sHour[h]));
+        const ops = Object.entries(st.opE).sort((a, b) => b[1] - a[1]).slice(0, 8);
+        bars($('c-ops'), ops.map(o => o[0].length > 14 ? o[0].slice(0, 13) + '…' : o[0]), ops.map(o => o[1]), { horizontal: true, padL: 88, h: 170 });
+      }
+    }
+
+    // ---- playback ----
+    const scrub = $('scrub'), playBtn = $('play');
+    scrub.max = tMax;
+    let playing = false, t = 0, last = 0;
+    function frame(now) {
+      if (!playing) return;
+      const dt = Math.min(0.1, (now - last) / 1000); last = now;
+      t = Math.min(tMax, t + dt * Number($('speed').value));
+      advance(t); render(false);
+      if (t >= tMax) { setPlaying(false); return; }
+      requestAnimationFrame(frame);
+    }
+    function setPlaying(p) {
+      playing = p; playBtn.textContent = p ? 'Pause' : (t >= tMax ? 'Replay' : 'Play');
+      if (p) { if (t >= tMax) { t = 0; } last = performance.now(); requestAnimationFrame(frame); }
+    }
+    playBtn.addEventListener('click', () => setPlaying(!playing));
+    scrub.addEventListener('input', () => { t = Number(scrub.value); advance(t); render(true); });
+
+    // ?t=<minutes> opens the replay at a given moment, paused
+    const startAt = Number(new URLSearchParams(location.search).get('t'));
+    t = startAt > 0 ? Math.min(tMax, startAt) : 0;
+    reset(); advance(t); render(true);
+    playBtn.disabled = false;
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    setPlaying(!reduce && !(startAt > 0));
+  }
+})();
+</script>
+</body>
+</html>

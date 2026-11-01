@@ -65,6 +65,9 @@ li { margin-bottom: 0.6rem; }
   font: 0.85rem system-ui, sans-serif;
 }
 
+.authors { color: var(--muted); }
+.authors .me { color: var(--fg); }
+
 .empty { color: var(--muted); font-style: italic; }
 
 footer { margin-top: 4rem; color: var(--muted); font-size: 0.85rem; }
